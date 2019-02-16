@@ -8,6 +8,54 @@
 #include <iomanip>
 
 
+//--------------------------------------Timer-----------------------------------
+/* Gives us high-resolution timers. */
+#define _POSIX_C_SOURCE 199309L
+#include <time.h>
+
+/* OSX timer includes */
+#ifdef __MACH__
+  #include <mach/mach.h>
+  #include <mach/mach_time.h>
+#endif
+
+/**
+* @brief Return the number of seconds since an unspecified time (e.g., Unix
+*        epoch). This is accomplished with a high-resolution monotonic timer,
+*        suitable for performance timing.
+*
+* @return The number of seconds.
+*/
+static inline double monotonic_seconds()
+{
+#ifdef __MACH__
+  /* OSX */
+  static mach_timebase_info_data_t info;
+  static double seconds_per_unit;
+  if(seconds_per_unit == 0) {
+    mach_timebase_info(&info);
+    seconds_per_unit = (info.numer / info.denom) / 1e9;
+  }
+  return seconds_per_unit * mach_absolute_time();
+#else
+  /* Linux systems */
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec + ts.tv_nsec * 1e-9;
+#endif
+}
+
+/**
+* @brief Output the seconds elapsed while clustering.
+*
+* @param seconds Seconds spent on k-means clustering, excluding IO.
+*/
+static void print_time(double const seconds)
+{
+  printf("k-means clustering time: %0.04fs\n", seconds);
+}
+
+//--------------------------------------Data structures-------------------------
 typedef std::vector<double> coords_t;
 
 double coord_dist(const coords_t& p1, const coords_t& p2) {
@@ -56,6 +104,8 @@ points_t points;
 pthread_mutex_t lock;
 
 
+//-----------------------------Functions-------------------------------------
+
 // read file and initialize parameters
 void init(const char* file) {
   // initialize N, D, points
@@ -95,7 +145,7 @@ bool find_home_cluster(Point* p) {
   assert(p->i >= 0);
 
   pthread_mutex_lock(&lock);
-  std::cout<<"Assigned point "<< *p << " to cluster " << p->i <<"\n";
+  //std::cout<<"Assigned point "<< *p << " to cluster " << p->i <<"\n";
   pthread_mutex_unlock(&lock);
   return converge;
 }
@@ -114,7 +164,7 @@ void* assign_on_chunk(void* args) {
   *converge = true;
   for (int i = params->si; i < params->ei && i < points.size(); i++) {
     pthread_mutex_lock(&lock);
-    std::cout<<"Working on assigning point " << i <<"\n";
+    //std::cout<<"Working on assigning point " << i <<"\n";
     pthread_mutex_unlock(&lock);
     // && is short circuit, put the function call at left side !!!
     *converge = find_home_cluster(points[i]) && *converge;
@@ -131,14 +181,14 @@ void* assign_on_chunk(void* args) {
 bool assign() {
   // !! This must be ceiling, otherwise some points will be left out!!
   int chunksize = points.size() / nthreads + (points.size() % nthreads != 0);
-  std::cout<<"Assign points to cluster... Divide work to chunksize "<<chunksize<<"\n";
+  //std::cout<<"Assign points to cluster... Divide work to chunksize "<<chunksize<<"\n";
   for (int i = 0; i < nthreads; i++) {
     int si = i * chunksize;
     int ei = (i+1) * chunksize;
     // dynamically allocate arguments, running thread should free it
     // before exit
     Args* args = new Args(si, ei);
-    std::cout<<"generate work from "<< si << " to " << ei << "\n";
+    //std::cout<<"generate work from "<< si << " to " << ei << "\n";
     pthread_create(&threads[i], nullptr, assign_on_chunk, args);
   }
 
@@ -169,7 +219,7 @@ void* update_centroid_on_chunk(void* argss) {
     Point* p = points[i];
     assert(p->i >= 0);
     int home = p->i;
-    std::cout<<"Updating centroid for cluster " << home << "\n";
+    //std::cout<<"Updating centroid for cluster " << home << "\n";
     for (int d = 0; d < D; d++) {
       double oldavg = params->avgs->get((std::size_t)home, (std::size_t)d);
       params->avgs->set((std::size_t)home, (std::size_t)d, oldavg + p->coords[d] / clusters[home]->members.size()); 
@@ -183,7 +233,7 @@ void* update_centroid_on_chunk(void* argss) {
   
 //
 void update_centroid(int K) {
-  std::cout<<"Update centroid...\n";
+  //std::cout<<"Update centroid...\n";
   // K clusters / points, each point has D dimension
   Matrix* avgs = new Matrix(K, D);
   for (int k = 0; k < K; k++) {
@@ -196,7 +246,7 @@ void update_centroid(int K) {
     int si = i * chunksize;
     int ei = (i + 1) * chunksize;
     Argss* argss = new Argss(si, ei, avgs);
-    std::cout<<"generate work from "<< si << " to " << ei << "\n";
+    //std::cout<<"generate work from "<< si << " to " << ei << "\n";
     pthread_create(&threads[i], nullptr, update_centroid_on_chunk, argss);
   }
 
@@ -221,19 +271,21 @@ void kmeans(int K) {
     Cluster* cluster = new Cluster(i, points[i]->coords);
     clusters.push_back(cluster);
   }
+  double ts = monotonic_seconds();
   bool converge = assign();
 
-  
-  for (auto p : points) {
-    assert(p->i >= 0);
-  }
-  
+  // for (auto p : points) {
+  //   assert(p->i >= 0);
+  // }
   
   int niters = 1;
   while(!converge && niters < 20) {
     update_centroid(K);
     niters++;
   }
+  double te = monotonic_seconds();
+
+  print_time(te - ts);
 }
 
 void output(int K, const char* f1, const char* f2) {
