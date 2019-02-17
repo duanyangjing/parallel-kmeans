@@ -17,6 +17,9 @@ public:
   float* getRow(int r);
  
   void set(int r, int c, float v);
+
+  // copy given float array to row r in the matrix.
+  void setRow(int r, float* p);
   
 };
 

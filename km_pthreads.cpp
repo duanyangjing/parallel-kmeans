@@ -69,7 +69,7 @@ float ParallelKMeans::dist(float* p1, float* p2) {
 
 // Find the closest cluster to given point index i. Concurrent read on clusters,
 // but no write, Concurrent r/w on assignment, but is per point (thread).
-// So no lock needed.
+// but concurrent incrementing population[home] which is not thread safe!!!
 // return true if the point didn't change the cluster it belongs to
 bool ParallelKMeans::findHomeCluster(int pi) {
   float* p = points->getRow(pi);
@@ -87,7 +87,10 @@ bool ParallelKMeans::findHomeCluster(int pi) {
   bool sameHome = assignment[pi] == home;
   assignment[pi] = home;
   assert(assignment[pi] >= 0 && home >= 0);
+  
+  pthread_mutex_lock(&lock);
   population[home]++;
+  pthread_mutex_unlock(&lock);
 
   return sameHome;
 }
@@ -138,16 +141,19 @@ bool ParallelKMeans::assign() {
 }
 
 
-
+// Concurrent r/w on clusters!!! not thread safe
 void* ParallelKMeans::updateCentroidsChunk(void* args) {
   Args* params = (Args*)args;
   for (int pi = params->si; pi < params->ei && pi < N; pi++) {
     float* p = points->getRow(pi);
     int home = assignment[pi];
+    // TODO: which performance is better? lock/unlock inside or outside for?
+    pthread_mutex_lock(&lock);
     for (int d = 0; d < D; d++) {
       float old = clusters->get(home, d);
       clusters->set(home, d, old + p[d]);
     }
+    pthread_mutex_unlock(&lock);
   }
 
   delete params;
@@ -181,6 +187,7 @@ void ParallelKMeans::updateCentroids() {
   // TODO: this can be parallized too, might be able to just
   // use the original clusters, no need to copy around
   for (int k = 0; k < K; k++) {
+    assert(population[k] > 0)
     for (int d = 0; d < D; d++) {
       clusters->set(k, d, clusters->get(k, d) / population[k]);
     }
@@ -201,8 +208,8 @@ ParallelKMeans::ParallelKMeans(std::ifstream& in, int K, int nthreads):
   assignment = new int[N];
   population = new int[K];
 
-  for (int i = 0; i < K; i++) {
-    population[i] = 0;
+  if (pthread_mutex_init(&lock, NULL) != 0) {
+    printf("\n mutex init has failed\n");
   }
 
   float x;
@@ -212,6 +219,11 @@ ParallelKMeans::ParallelKMeans(std::ifstream& in, int K, int nthreads):
       points->set(i, j, x);
     }
     assignment[i] = -1;
+  }
+
+  for (int i = 0; i < K; i++) {
+    population[i] = 0;
+    clusters->setRow(i, points->getRow(i));
   }
 }
 
@@ -223,9 +235,10 @@ ParallelKMeans::~ParallelKMeans() {
 }
 
 void ParallelKMeans::writeCentroids(std::ofstream& out) {
+  out << K << " " << D << "\n";
   for (int i = 0; i < K; i++) {
     for (int j = 0; j < D; j++) {
-      out << clusters->get(i,j) << " ";
+      out << std::fixed << std::setprecision(3) << clusters->get(i,j) << " ";
     }
     out << "\n";
   }
@@ -264,8 +277,8 @@ int main(int argc, char** argv) {
   
   std::ofstream out1("clusters.txt");
   std::ofstream out2("centroids.txt");
-  //km.writePointAssignment(out1);
-  //km.writeCentroids(out2);
+  km.writePointAssignment(out1);
+  km.writeCentroids(out2);
   
   // for (Point* p : points) {
   //   for (auto x : p->coords) {

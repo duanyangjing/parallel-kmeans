@@ -33,6 +33,8 @@ private:
   int* assignment; // size N array, map point p (row index of points) to cluster c (row index of clusters)
   int* population; // size K array, population of a cluster
 
+  pthread_mutex_t lock; // 
+  
   float dist(float* p1, float* p2);
   bool findHomeCluster(int pi);
   // This seems to be a workaround to call pthread on a class member function
