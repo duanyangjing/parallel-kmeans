@@ -3,7 +3,7 @@
 
 class Matrix {
 private:
-  double* data;
+  float* data;
   int nr;
   int nc;
 
@@ -12,11 +12,11 @@ public:
   
   ~Matrix();
     
-  double get(int r, int c);
+  float get(int r, int c);
 
-  double* getRow(int r);
+  float* getRow(int r);
  
-  void set(int r, int c, double v);
+  void set(int r, int c, float v);
   
 };
 

@@ -12,13 +12,13 @@ struct Args {
 };
 
 
-struct Argss {
-  int si, ei;
-  Matrix* avgs;
-  ParallelKMeans* self;
-  Argss(int si, int ei, Matrix* avgs, ParallelKMeans* self):
-    si(si), ei(ei), avgs(avgs), self(self) {}
-};
+// struct Argss {
+//   int si, ei;
+//   Matrix* avgs;
+//   ParallelKMeans* self;
+//   Argss(int si, int ei, Matrix* avgs, ParallelKMeans* self):
+//     si(si), ei(ei), avgs(avgs), self(self) {}
+// };
 
 class ParallelKMeans {
 private:
@@ -33,7 +33,7 @@ private:
   int* assignment; // size N array, map point p (row index of points) to cluster c (row index of clusters)
   int* population; // size K array, population of a cluster
 
-  double dist(double* p1, double* p2);
+  float dist(float* p1, float* p2);
   bool findHomeCluster(int pi);
   // This seems to be a workaround to call pthread on a class member function
   // more elegant solution should be using std::thread
@@ -45,7 +45,7 @@ private:
   bool assign();
 
   static void* updateCentroidsChunkWrapper(void* args) {
-    ParallelKMeans* obj = (ParallelKMeans*)(((Argss*)args)->self);
+    ParallelKMeans* obj = (ParallelKMeans*)(((Args*)args)->self);
     return obj->updateCentroidsChunk(args);
   }
   void* updateCentroidsChunk(void* argss);
