@@ -1,11 +1,11 @@
 #include <iostream>
 #include <fstream>
-#include <vector>
 #include <pthread.h>
 #include <math.h>
-#include "utils.h"
+#include "utils.hh"
 #include <assert.h>
 #include <iomanip>
+#include "pkmeans.hh"
 
 
 //--------------------------------------Timer-----------------------------------
@@ -55,119 +55,51 @@ static void print_time(double const seconds)
   printf("k-means clustering time: %0.04fs\n", seconds);
 }
 
-//--------------------------------------Data structures-------------------------
-typedef std::vector<double> coords_t;
 
-double coord_dist(const coords_t& p1, const coords_t& p2) {
+//-----------------------------Private methods----------------------------------
+double ParallelKMeans::dist(double* p1, double* p2) {
   double sum = 0.0;
-  for (int i = 0; i < p1.size(); i++) {
+  for (int i = 0; i < D; i++) {
     sum += (p1[i] - p2[i]) * (p1[i] - p2[i]);
   }
   
   return sqrt(sum);
 }
 
-struct Point {
-  int i; // assignment to cluster id [0, K)
-  coords_t coords;
-  Point(coords_t coords): coords(coords) {i = -1;}
-  double dist(coords_t coords) {
-    return coord_dist(coords, this->coords);
-  }
-};
-
-std::ostream& operator <<(std::ostream& os, const Point& p) {
-  for (double coord : p.coords) {
-    os << coord << " ";
-  }
-  return os;
-}
-
-typedef std::vector<Point*> points_t;
-
-struct Cluster {
-  int i; // cluster id [0, K) 
-  coords_t centroid;
-  points_t members;
-  Cluster(int i, coords_t c): i(i), centroid(c) {}
-};
-
-
-
-int N, D; // N - number of points, D - dimensionality
-int nthreads;
-#define MAX_THREADS 16
-#define MAX_ITERATIONS 20
-pthread_t threads[MAX_THREADS];
-std::vector<Cluster*> clusters;
-points_t points;
-pthread_mutex_t lock;
-
-
-//-----------------------------Functions-------------------------------------
-
-// read file and initialize parameters
-void init(const char* file) {
-  // initialize N, D, points
-  std::ifstream in(file);
-  in >> N >> D;
-  
-  for (int i = 0; i < N; i++) {
-    coords_t* coords = new std::vector<double>();
-    double x;
-    for (int i = 0; i < D; i++) {
-      in >> x;
-      coords->push_back(x);
-    }
-    points.push_back(new Point(*coords));
-  }
-}
-
-
-// find the closest cluster to given point p, add p to the members
-// of the closest cluster. Concurrent read to centroid field, but
-// write to members field, so no locks needed.
+// Find the closest cluster to given point index i. Concurrent read on clusters,
+// but no write, Concurrent r/w on assignment, but is per point (thread).
+// So no lock needed.
 // return true if the point didn't change the cluster it belongs to
-bool find_home_cluster(Point* p) {
-  double mindist = p->dist(clusters[0]->centroid);
-  Cluster* home = nullptr;
-  for (Cluster* cluster : clusters) {
-    double d = p->dist(cluster->centroid);
+bool ParallelKMeans::findHomeCluster(int pi) {
+  double* p = points->getRow(pi);
+  double mindist = dist(p, clusters->getRow(0));
+  int home = -1;
+  for (int ci = 0; ci < K; ci++) {
+    double* cluster = clusters->getRow(ci);
+    double d = dist(p, cluster);
     if (d <= mindist) {
       mindist = d;
-      home = cluster;
+      home = ci;
     }
   }
-  home->members.push_back(p);
 
-  bool converge = p->i == home->i;
-  p->i = home->i;
-  assert(p->i >= 0);
+  bool converge = assignment[pi] == home;
+  assignment[pi] = home;
+  assert(assignment[pi] >= 0 && home >= 0);
+  population[home]++;
 
-  pthread_mutex_lock(&lock);
-  //std::cout<<"Assigned point "<< *p << " to cluster " << p->i <<"\n";
-  pthread_mutex_unlock(&lock);
   return converge;
 }
 
 
-struct Args {
-  int si, ei; // si inclusive, ei exclusive
-  Args(int si, int ei): si(si), ei(ei) {}
-};
-
-
-void* assign_on_chunk(void* args) {
+void* ParallelKMeans::assignChunk(void* args) {
   Args* params = (Args*)args;
   // dynamically allocate the return value, master thread frees it
   bool* converge = new bool;
   *converge = true;
-  for (int i = params->si; i < params->ei && i < points.size(); i++) {
-    pthread_mutex_lock(&lock);
-    //std::cout<<"Working on assigning point " << i <<"\n";
-    pthread_mutex_unlock(&lock);
+  for (int pi = params->si; pi < params->ei && pi < N; pi++) {
     // && is short circuit, put the function call at left side !!!
-    *converge = find_home_cluster(points[i]) && *converge;
+    *converge = findHomeCluster(pi) && *converge;
   }
 
   // free args before thread exits
@@ -178,18 +110,17 @@ void* assign_on_chunk(void* args) {
 
 
 // return if the assignment was converged (same as previous assignment)
-bool assign() {
+bool ParallelKMeans::assign() {
   // !! This must be ceiling, otherwise some points will be left out!!
-  int chunksize = points.size() / nthreads + (points.size() % nthreads != 0);
+  int chunksize = N / nthreads + (N % nthreads != 0);
   //std::cout<<"Assign points to cluster... Divide work to chunksize "<<chunksize<<"\n";
   for (int i = 0; i < nthreads; i++) {
     int si = i * chunksize;
     int ei = (i+1) * chunksize;
-    // dynamically allocate arguments, running thread should free it
-    // before exit
-    Args* args = new Args(si, ei);
+    // dynamically allocate arguments, which child thread should free before exit
+    Args* args = new Args(si, ei, this);
     //std::cout<<"generate work from "<< si << " to " << ei << "\n";
-    pthread_create(&threads[i], nullptr, assign_on_chunk, args);
+    pthread_create(&threads[i], nullptr, assignChunkWrapper, args);
   }
 
   bool converge = true;
@@ -201,39 +132,29 @@ bool assign() {
     delete (bool*)ret;
   }
 
-  std::cout<<"Assign done.\n";
+  // std::cout<<"Assign done.\n";
   return converge;
-} 
-
-struct Argss {
-  int si, ei;
-  Matrix* avgs;
-  Argss(int si, int ei, Matrix* avgs):
-    si(si), ei(ei), avgs(avgs) {}
-};
+}
 
 
-void* update_centroid_on_chunk(void* argss) {
+
+void* ParallelKMeans::updateCentroidsChunk(void* argss) {
   Argss* params = (Argss*)argss;
-  for (int i = params->si; i < params->ei && i < points.size(); i++) {
-    Point* p = points[i];
-    assert(p->i >= 0);
-    int home = p->i;
-    //std::cout<<"Updating centroid for cluster " << home << "\n";
+  for (int pi = params->si; pi < params->ei && pi < N; pi++) {
+    double* p = points->getRow(pi);
+    int home = assignment[pi];
     for (int d = 0; d < D; d++) {
-      double oldavg = params->avgs->get((std::size_t)home, (std::size_t)d);
-      params->avgs->set((std::size_t)home, (std::size_t)d, oldavg + p->coords[d] / clusters[home]->members.size()); 
+      double oldavg = params->avgs->get(home, d);
+      params->avgs->set(home, d, oldavg + p[d] / population[home]); 
     }
   }
 
   // return origin params, because matrix inside has been updated for return.
-  pthread_exit((void*)params);
+  // no need to explicitly return avgs, its still there
+  pthread_exit(nullptr);
 }
 
-  
-//
-void update_centroid(int K) {
-  //std::cout<<"Update centroid...\n";
+void ParallelKMeans::updateCentroids() {
   // K clusters / points, each point has D dimension
   Matrix* avgs = new Matrix(K, D);
   for (int k = 0; k < K; k++) {
@@ -241,13 +162,13 @@ void update_centroid(int K) {
       avgs->set(k,d,0.0);
     }
   }
-  int chunksize = points.size() / nthreads + (points.size() % nthreads != 0);
+  
+  int chunksize = N / nthreads + (N % nthreads != 0);
   for (int i = 0; i < nthreads; i++) {
     int si = i * chunksize;
     int ei = (i + 1) * chunksize;
-    Argss* argss = new Argss(si, ei, avgs);
-    //std::cout<<"generate work from "<< si << " to " << ei << "\n";
-    pthread_create(&threads[i], nullptr, update_centroid_on_chunk, argss);
+    Argss* argss = new Argss(si, ei, avgs, this);
+    pthread_create(&threads[i], nullptr, updateCentroidsChunkWrapper, argss);
   }
 
   // after join, matrix contains K new centroid
@@ -255,64 +176,96 @@ void update_centroid(int K) {
     pthread_join(threads[i], nullptr);
   }
 
-  // TODO: this can be parallized too
+  // TODO: this can be parallized too, might be able to just
+  // use the original clusters, no need to copy around
   for (int k = 0; k < K; k++) {
     for (int d = 0; d < D; d++) {
-      (clusters[k]->centroid)[d] = avgs->get((std::size_t)k,(std::size_t)d);
+      clusters->set(k, d, avgs->get(k, d));
     }
   }
   // TODO: possible mem leak, argss (si,ei) not freed, but very tiny
   delete avgs;
 }
 
-void kmeans(int K) {
-  // initialize k clusters
-  for (int i = 0; i < K; i++) {
-    Cluster* cluster = new Cluster(i, points[i]->coords);
-    clusters.push_back(cluster);
-  }
-  double ts = monotonic_seconds();
-  bool converge = assign();
 
-  // for (auto p : points) {
-  //   assert(p->i >= 0);
-  // }
-  
-  int niters = 1;
-  while(!converge && niters < 20) {
-    update_centroid(K);
-    niters++;
-  }
-  double te = monotonic_seconds();
+//-----------------------------Public methods-----------------------------------
+ParallelKMeans::ParallelKMeans(std::ifstream& in, int K, int nthreads):
+  K(K), nthreads(nthreads) {
+  // initialize N, D, points, clusters, assignment
+  in >> N >> D;
+  threads = new pthread_t[nthreads];
+  points = new Matrix(N, D);
+  clusters = new Matrix(K, D);
+  assignment = new int[N];
+  population = new int[K];
 
-  print_time(te - ts);
+  for (int i = 0; i < N; i++) {
+    assignment[i] = -1;
+  }
+
+  double x;
+  for (int i = 0; i < N; i++) {
+    for (int j = 0; j < D; j++) {
+      in >> x;
+      points->set(i, j, x);
+    }
+  }
 }
 
-void output(int K, const char* f1, const char* f2) {
-  std::ofstream s1(f1);
-  std::ofstream s2(f2);
+ParallelKMeans::~ParallelKMeans() {
+  delete points;
+  delete clusters;
+  delete[] assignment;
+  delete[] population;
+}
+
+void ParallelKMeans::writeCentroids(std::ofstream& out) {
+  for (int i = 0; i < K; i++) {
+    for (int j = 0; j < D; j++) {
+      out << clusters->get(i,j) << " ";
+    }
+    out << "\n";
+  }
+}
+
+void ParallelKMeans::writePointAssignment(std::ofstream& out) {
   for (int i = 0; i < N; i++) {
-    s1 << points[i]->i << "\n";
+    out << assignment[i] << "\n";
+  }
+}
+
+
+void ParallelKMeans::run() {
+  bool converge = assign();
+  int niters = 1;
+
+  double ts = monotonic_seconds();
+
+  while (!converge && niters < 20) {
+    updateCentroids();
+    niters++;
   }
 
-  for (int k = 0; k < K; k++) {
-    for (int d = 0; d < D; d++) {
-      s2 << std::fixed << std::setprecision(4) << (clusters[k]->centroid)[d] << " ";
-    }
-    s2 << "\n";
-  }
+  double te = monotonic_seconds();
+  print_time(te - ts);
 }
 
 
 int main(int argc, char** argv) {
-  char* filename = argv[1];
+  char* f = argv[1];
   int K = atoi(argv[2]); // number of clusters
-  nthreads = atoi(argv[3]);
-  
-  init(filename);
-  kmeans(K);
+  int nthreads = atoi(argv[3]);
 
-  output(K, "clusters.txt", "centroids.txt");
+  std::ifstream in(f);
+  ParallelKMeans km(in, K, nthreads);
+
+  km.run();
+  
+  std::ofstream out1("clusters.txt");
+  std::ofstream out2("centroids.txt");
+  km.writePointAssignment(out1);
+  km.writeCentroids(out2);
+  
   
   // for (Point* p : points) {
   //   for (auto x : p->coords) {
