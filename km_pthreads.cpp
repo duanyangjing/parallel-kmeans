@@ -86,11 +86,11 @@ bool ParallelKMeans::findHomeCluster(int pi) {
 
   bool sameHome = assignment[pi] == home;
   assignment[pi] = home;
-  assert(assignment[pi] >= 0 && home >= 0);
+  //assert(assignment[pi] >= 0 && home >= 0);
   
-  pthread_mutex_lock(&lock);
+  pthread_mutex_lock(&locks[home]);
   population[home]++;
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&locks[home]);
 
   return sameHome;
 }
@@ -144,27 +144,32 @@ bool ParallelKMeans::assign() {
 // Concurrent r/w on clusters!!! not thread safe
 void* ParallelKMeans::updateCentroidsChunk(void* args) {
   Args* params = (Args*)args;
+  // local cluster of this chunk of work, to be returned
+  Matrix* localCluster = new Matrix(K, D);
+  for (int i = 0; i < K; i++) {
+    for (int j = 0; j < D; j++) {
+      localCluster->set(i, j, 0.0);
+    }
+  }
+  
   for (int pi = params->si; pi < params->ei && pi < N; pi++) {
     float* p = points->getRow(pi);
     int home = assignment[pi];
-    // TODO: which performance is better? lock/unlock inside or outside for?
-    pthread_mutex_lock(&lock);
     for (int d = 0; d < D; d++) {
-      float old = clusters->get(home, d);
-      clusters->set(home, d, old + p[d]);
+      float old = localCluster->get(home, d);
+      localCluster->set(home, d, old + p[d]);
     }
-    pthread_mutex_unlock(&lock);
   }
 
   delete params;
   // return origin params, because matrix inside has been updated for return.
   // no need to explicitly return avgs, its still there
-  pthread_exit(NULL);
+  pthread_exit((void*)localCluster);
 }
 
 void ParallelKMeans::updateCentroids() {
   // K clusters / points, each point has D dimension
-  //Matrix* avgs = new Matrix(K, D);
+  // zero fill clusters
   for (int k = 0; k < K; k++) {
     for (int d = 0; d < D; d++) {
       clusters->set(k, d, 0.0);
@@ -179,21 +184,34 @@ void ParallelKMeans::updateCentroids() {
     pthread_create(&threads[i], NULL, updateCentroidsChunkWrapper, args);
   }
 
-  // after join, centroids contain sum of all member points
+  // after join, each thread return a local cluster, need to sum and compute avg
+  Matrix* localClusters[nthreads];
   for (int i = 0; i < nthreads; i++) {
-    pthread_join(threads[i], NULL);
+    void* localCluster;
+    pthread_join(threads[i], &localCluster);
+    localClusters[i] = (Matrix*)localCluster;
   }
 
   // TODO: this can be parallized too, might be able to just
   // use the original clusters, no need to copy around
+  
   for (int k = 0; k < K; k++) {
-    assert(population[k] > 0)
+    //assert(population[k] > 0);
     for (int d = 0; d < D; d++) {
-      clusters->set(k, d, clusters->get(k, d) / population[k]);
+      float sum = 0.0;
+      for (int t = 0; t < nthreads; t++) {
+	sum += localClusters[t]->get(k, d);
+      }
+      clusters->set(k, d, sum / population[k]);
     }
     // reset population
     population[k] = 0;
   }
+
+  for (int i = 0; i < nthreads; i++) {
+    delete localClusters[i];
+  }
+  
 }
 
 
@@ -207,10 +225,7 @@ ParallelKMeans::ParallelKMeans(std::ifstream& in, int K, int nthreads):
   clusters = new Matrix(K, D);
   assignment = new int[N];
   population = new int[K];
-
-  if (pthread_mutex_init(&lock, NULL) != 0) {
-    printf("\n mutex init has failed\n");
-  }
+  locks = new pthread_mutex_t[K];
 
   float x;
   for (int i = 0; i < N; i++) {
@@ -224,14 +239,19 @@ ParallelKMeans::ParallelKMeans(std::ifstream& in, int K, int nthreads):
   for (int i = 0; i < K; i++) {
     population[i] = 0;
     clusters->setRow(i, points->getRow(i));
+    if (pthread_mutex_init(&locks[i], NULL) != 0) {
+      printf("\n mutex init has failed\n");
+    }
   }
 }
 
 ParallelKMeans::~ParallelKMeans() {
   delete points;
   delete clusters;
+  delete[] threads;
   delete[] assignment;
   delete[] population;
+  delete[] locks;
 }
 
 void ParallelKMeans::writeCentroids(std::ofstream& out) {
@@ -277,8 +297,8 @@ int main(int argc, char** argv) {
   
   std::ofstream out1("clusters.txt");
   std::ofstream out2("centroids.txt");
-  km.writePointAssignment(out1);
-  km.writeCentroids(out2);
+  //km.writePointAssignment(out1);
+  //km.writeCentroids(out2);
   
   // for (Point* p : points) {
   //   for (auto x : p->coords) {
