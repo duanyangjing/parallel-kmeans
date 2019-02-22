@@ -273,11 +273,12 @@ void ParallelKMeans::writePointAssignment(std::ofstream& out) {
 
 void ParallelKMeans::run() {
   double ts = monotonic_seconds();
-  
+
+  assign();
   for (int i = 0; i < MAX_ITERATIONS; i++) {
+    updateCentroids();
     // stop if converges
     if (assign()) break;
-    else updateCentroids();
   }
 
   double te = monotonic_seconds();
@@ -297,8 +298,8 @@ int main(int argc, char** argv) {
   
   std::ofstream out1("clusters.txt");
   std::ofstream out2("centroids.txt");
-  //km.writePointAssignment(out1);
-  //km.writeCentroids(out2);
+  km.writePointAssignment(out1);
+  km.writeCentroids(out2);
   
   // for (Point* p : points) {
   //   for (auto x : p->coords) {
