@@ -238,8 +238,8 @@ int main(int argc, char** argv) {
   
   std::ofstream out1("clusters.txt");
   std::ofstream out2("centroids.txt");
-  //writePointAssignment(out1);
-  //writeCentroids(out2);
+  writePointAssignment(out1);
+  writeCentroids(out2);
   
   cleanup();
   return 0;
